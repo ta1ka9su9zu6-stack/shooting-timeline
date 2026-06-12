@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>撮影タイムライン</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>撮影タイムライン</h1>
+        <p id="saveStatus" class="status-text">保存済み</p>
+      </div>
+      <div class="toolbar" aria-label="操作">
+        <button id="addRowBtn" class="primary-action" type="button">予定を追加</button>
+        <button id="duplicateBtn" type="button">複製</button>
+        <button id="columnsBtn" type="button">列設定</button>
+        <button id="printPortraitBtn" type="button">縦向き印刷</button>
+        <button id="printLandscapeBtn" type="button">横向き印刷</button>
+        <button id="cloudBtn" type="button">同期設定</button>
+        <button id="historyBtn" type="button">履歴</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="meta-strip" aria-label="撮影情報">
+        <label>
+          <span>表タイトル</span>
+          <input id="tableTitleInput" type="text" placeholder="撮影スケジュール">
+        </label>
+        <label>
+          <span>撮影日</span>
+          <input id="shootDateInput" type="date">
+        </label>
+        <label>
+          <span>撮影場所</span>
+          <input id="shootPlaceInput" type="text" placeholder="西船橋 アリュール">
+        </label>
+        <label>
+          <span>表示開始</span>
+          <input id="dayStartInput" type="time" step="60">
+        </label>
+        <label>
+          <span>表示終了</span>
+          <input id="dayEndInput" type="time" step="60">
+        </label>
+        <label>
+          <span>刻み</span>
+          <select id="snapInput">
+            <option value="1" selected>1分</option>
+            <option value="5">5分</option>
+            <option value="10">10分</option>
+            <option value="15">15分</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="timeline-section" aria-label="タイムライン">
+        <div class="timeline-head">
+          <h2>タイムライン</h2>
+          <div id="timelineRangeLabel" class="muted"></div>
+        </div>
+        <div id="timelineViewport" class="timeline-viewport">
+          <div id="timelineCanvas" class="timeline-canvas">
+            <div id="ticksLayer" class="ticks-layer"></div>
+            <div id="cardsLayer" class="cards-layer"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="table-section" aria-label="表入力">
+        <div class="table-head">
+          <h2 id="tableTitleHeading">表入力</h2>
+          <div class="muted">タイムラインと同じデータです</div>
+        </div>
+        <div class="sheet-wrap">
+          <table id="scheduleTable" class="schedule-table">
+            <colgroup id="scheduleColgroup"></colgroup>
+            <thead>
+              <tr id="scheduleHeader"></tr>
+            </thead>
+            <tbody id="scheduleBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="cloudDialog" class="cloud-dialog">
+    <form method="dialog">
+      <div class="dialog-title">
+        <h2>同期設定</h2>
+        <button id="closeCloudBtn" class="icon-button" value="cancel" aria-label="閉じる" type="submit">×</button>
+      </div>
+      <div class="cloud-grid">
+        <label>
+          <span>Supabase URL</span>
+          <input id="supabaseUrlInput" type="url" placeholder="https://xxxx.supabase.co">
+        </label>
+        <label>
+          <span>Anon key</span>
+          <input id="supabaseKeyInput" type="password" autocomplete="off">
+        </label>
+        <label>
+          <span>共有ID</span>
+          <input id="workspaceIdInput" type="text" placeholder="shooting-main">
+        </label>
+        <label>
+          <span>編集者名（履歴に記録）</span>
+          <input id="editorNameInput" type="text" placeholder="例: 田中">
+        </label>
+      </div>
+      <div class="cloud-actions">
+        <button id="pullCloudBtn" type="button">クラウドから読み込み</button>
+        <button id="pushCloudBtn" type="button" class="primary-action">クラウドへ保存</button>
+      </div>
+      <p id="cloudStatus" class="status-text">未接続</p>
+    </form>
+  </dialog>
+
+  <dialog id="columnsDialog" class="settings-dialog">
+    <form method="dialog">
+      <div class="dialog-title">
+        <h2>列設定</h2>
+        <button class="icon-button" value="cancel" aria-label="閉じる" type="submit">×</button>
+      </div>
+      <div id="columnsList" class="columns-list"></div>
+      <div class="column-add">
+        <label>
+          <span>追加する列名</span>
+          <input id="newColumnInput" type="text" placeholder="例: 担当者">
+        </label>
+        <button id="addColumnBtn" class="primary-action" type="button">列を追加</button>
+      </div>
+      <p class="status-text">開始・撮影時間・終了はタイムラインに必要なため削除できません。</p>
+    </form>
+  </dialog>
+
+  <dialog id="historyDialog" class="settings-dialog">
+    <form method="dialog">
+      <div class="dialog-title">
+        <h2>編集履歴</h2>
+        <button class="icon-button" value="cancel" aria-label="閉じる" type="submit">×</button>
+      </div>
+      <div class="cloud-actions">
+        <button id="refreshHistoryBtn" type="button">最新を取得</button>
+      </div>
+      <div id="historyList" class="columns-list"></div>
+      <p id="historyStatus" class="status-text">未読み込み</p>
+    </form>
+  </dialog>
+
+  <section id="printSheet" class="print-sheet" aria-label="印刷用">
+    <h1 id="printTitle">撮影スケジュール</h1>
+    <div class="print-meta">
+      <span id="printDate"></span>
+      <span id="printPlace"></span>
+    </div>
+    <table class="print-table">
+      <colgroup id="printColgroup"></colgroup>
+      <thead>
+        <tr id="printHeader"></tr>
+      </thead>
+      <tbody id="printBody"></tbody>
+    </table>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
