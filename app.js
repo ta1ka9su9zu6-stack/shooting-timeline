@@ -76,6 +76,10 @@ let realtimeChannel = null;
 let pendingRemoteState = null;
 let isApplyingRemoteChange = false;
 let cloudPushTimer = null;
+// 自分がクラウドへ送信したスナップショットを覚えておき、Realtimeで
+// 返ってくる「自分のエコー」を他人の変更と誤認して巻き戻すのを防ぐ。
+const recentlyPushedHashes = new Set();
+const RECENT_PUSH_LIMIT = 30;
 
 let state = loadState();
 let selectedId = state.rows[0]?.id ?? null;
@@ -246,9 +250,12 @@ function normalizeExtras(extras, columns) {
 function normalizeFormats(formats, columns) {
   const normalized = {};
   const source = formats && typeof formats === "object" ? formats : {};
-  const validIds = new Set([...columns.map((column) => column.id), ACTION_COLUMN_ID]);
-  Object.entries(source).forEach(([columnId, value]) => {
-    if (!validIds.has(columnId) || !value || typeof value !== "object") return;
+  // 列の並び順で走査して常に同じキー順にする（jsonb往復でキー順が
+  // 変わってもシリアライズ結果が安定し、エコー判定が確実になる）。
+  const orderedIds = [...columns.map((column) => column.id), ACTION_COLUMN_ID];
+  orderedIds.forEach((columnId) => {
+    const value = source[columnId];
+    if (!value || typeof value !== "object") return;
     const bold = Boolean(value.bold);
     const color = typeof value.color === "string" && /^#[0-9a-fA-F]{6}$/.test(value.color) ? value.color : "";
     if (bold || color) normalized[columnId] = { bold, color };
@@ -1744,6 +1751,14 @@ function handleRealtimePayload(payload) {
   const normalizedRemoteState = normalizeState(remoteState);
   const remoteJson = JSON.stringify(normalizedRemoteState);
 
+  // 自分が送信した変更がエコーで返ってきただけなら無視する。
+  // （入力が速いと committedStateJson が先に進み、下の一致チェックを
+  //  すり抜けて自分の古い状態を適用＝巻き戻してしまうため）
+  if (recentlyPushedHashes.has(remoteJson)) {
+    recentlyPushedHashes.delete(remoteJson);
+    return;
+  }
+
   if (remoteJson === committedStateJson) return;
 
   if (isEditingScheduleCell()) {
@@ -1780,6 +1795,14 @@ function applyPendingRemoteState() {
   applyRemoteState(nextState);
 }
 
+function rememberPushedSnapshot(json) {
+  recentlyPushedHashes.add(json);
+  while (recentlyPushedHashes.size > RECENT_PUSH_LIMIT) {
+    const oldest = recentlyPushedHashes.values().next().value;
+    recentlyPushedHashes.delete(oldest);
+  }
+}
+
 function isEditingScheduleCell() {
   return document.activeElement?.matches(
     ".schedule-table input, .schedule-table textarea"
@@ -1791,6 +1814,8 @@ async function pushToCloud() {
     saveCloudConfig();
     const config = getCloudConfig();
     elements.cloudStatus.textContent = "保存中...";
+    // 送信するスナップショットを記録しておき、自分のエコーを無視できるようにする。
+    rememberPushedSnapshot(JSON.stringify(normalizeState(state)));
     const response = await fetch(`${config.url}/rest/v1/shooting_schedule_docs?on_conflict=workspace_id`, {
       method: "POST",
       headers: cloudHeaders(config, "resolution=merge-duplicates,return=representation"),
