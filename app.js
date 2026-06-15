@@ -92,6 +92,32 @@ let rowSelectionActive = false;
 let undoStack = [];
 let redoStack = [];
 let committedStateJson = JSON.stringify(state);
+// 直近に確定した状態（フィールド単位マージの差分スタンプ付与に使う）。
+let committedSnapshot = JSON.parse(committedStateJson);
+
+// この端末（タブ）を識別する ID と、フィールド編集スタンプ用の論理クロック。
+const clientId =
+  (crypto.randomUUID && crypto.randomUUID()) ||
+  `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+let logicalClock = 0;
+
+function newStamp() {
+  logicalClock = Math.max(logicalClock + 1, Date.now());
+  return { t: logicalClock, c: clientId };
+}
+
+// 受信した相手のスタンプに合わせて論理クロックを進める（因果順を保つ）。
+function observeRemoteClock(meta) {
+  if (window.SyncMerge) {
+    logicalClock = Math.max(logicalClock, window.SyncMerge.maxStampT(meta));
+  }
+}
+
+// スタンプを付けずに確定状態を更新する（リモート反映・プル・取り消し用）。
+function setCommitted() {
+  committedStateJson = JSON.stringify(state);
+  committedSnapshot = JSON.parse(committedStateJson);
+}
 
 init();
 
@@ -191,7 +217,7 @@ function normalizeState(input) {
     formats: normalizeFormats(row.formats, columns),
   }));
 
-  return {
+  const result = {
     tableTitle: input.tableTitle || fallback.tableTitle,
     shootDate: input.shootDate || fallback.shootDate,
     shootPlace: input.shootPlace || "",
@@ -203,6 +229,11 @@ function normalizeState(input) {
     columns,
     rows: rows.length ? rows : fallback.rows,
   };
+  // フィールド単位マージ用のメタ情報（編集スタンプ）を決定的な形で保持する。
+  result.fieldMeta = window.SyncMerge
+    ? window.SyncMerge.canonicalMeta(input.fieldMeta)
+    : (input && input.fieldMeta) || { doc: {}, rows: {} };
+  return result;
 }
 
 function normalizeColumns(inputColumns) {
@@ -666,6 +697,9 @@ function tableInputCell(row, field, type, value, className = "") {
   });
   input.addEventListener("change", () => {
     updateRow(row.id, field, input.value);
+  });
+  input.addEventListener("blur", () => {
+    applyPendingRemoteState();
   });
   applyCellFormatStyle(input, row, field);
   td.appendChild(input);
@@ -1619,6 +1653,10 @@ function scheduleCloudPush() {
 }
 
 function commitStateForUndo() {
+  // ローカル編集で変わったフィールドに新しいスタンプを付ける（マージ用）。
+  if (window.SyncMerge) {
+    window.SyncMerge.stampChanges(committedSnapshot, state, newStamp);
+  }
   const currentJson = JSON.stringify(state);
   if (currentJson === committedStateJson) return;
   if (undoStack[undoStack.length - 1] !== committedStateJson) {
@@ -1627,6 +1665,7 @@ function commitStateForUndo() {
   }
   redoStack = [];
   committedStateJson = currentJson;
+  committedSnapshot = JSON.parse(currentJson);
 }
 
 function undoLastState() {
@@ -1640,7 +1679,7 @@ function undoLastState() {
     redoStack.push(committedStateJson);
     if (redoStack.length > HISTORY_LIMIT) redoStack.shift();
     state = normalizeState(JSON.parse(previousJson));
-    committedStateJson = JSON.stringify(state);
+    setCommitted();
     pruneSelection();
     localStorage.setItem(STORAGE_KEY, committedStateJson);
     elements.saveStatus.textContent = "1つ前に戻しました";
@@ -1662,7 +1701,7 @@ function redoLastState() {
     undoStack.push(committedStateJson);
     if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
     state = normalizeState(JSON.parse(nextJson));
-    committedStateJson = JSON.stringify(state);
+    setCommitted();
     pruneSelection();
     localStorage.setItem(STORAGE_KEY, committedStateJson);
     elements.saveStatus.textContent = "1つ先の状態に進みました";
@@ -1761,20 +1800,33 @@ function handleRealtimePayload(payload) {
 
   if (remoteJson === committedStateJson) return;
 
+  observeRemoteClock(normalizedRemoteState.fieldMeta);
+
+  // 編集中は画面を作り替えると入力中のセルが乱れるため、いったん退避し、
+  // 編集が終わった時点（blur）でローカルとマージして反映する。
+  // 複数回届いてもマージで蓄積するので、途中の変更が失われない。
   if (isEditingScheduleCell()) {
-    pendingRemoteState = normalizedRemoteState;
-    elements.saveStatus.textContent = "他の人の変更があります";
+    pendingRemoteState = pendingRemoteState
+      ? normalizeState(window.SyncMerge.mergeStates(pendingRemoteState, normalizedRemoteState))
+      : normalizedRemoteState;
+    elements.saveStatus.textContent = "他の人の変更があります（編集後に反映）";
     return;
   }
 
   applyRemoteState(normalizedRemoteState);
 }
 
+// リモートの状態をローカルとフィールド単位でマージして反映する。
+// 上書きではなくマージなので、編集し合っても他の人のセルが消えない。
 function applyRemoteState(remoteState) {
   isApplyingRemoteChange = true;
 
-  state = normalizeState(remoteState);
-  committedStateJson = JSON.stringify(state);
+  observeRemoteClock(remoteState.fieldMeta);
+  const merged = window.SyncMerge
+    ? normalizeState(window.SyncMerge.mergeStates(state, remoteState))
+    : normalizeState(remoteState);
+  state = merged;
+  setCommitted();
 
   pruneSelection();
 
@@ -1784,6 +1836,12 @@ function applyRemoteState(remoteState) {
   elements.saveStatus.textContent = "他の人の変更を反映しました";
 
   isApplyingRemoteChange = false;
+
+  // マージ結果がリモートと異なる（=自分しか持っていない新しい変更がある）
+  // 場合は相手にも届くよう送り直す。merge は冪等なので収束する。
+  if (JSON.stringify(remoteState) !== committedStateJson) {
+    scheduleCloudPush();
+  }
 }
 
 function applyPendingRemoteState() {
@@ -1937,10 +1995,15 @@ async function pullFromCloud() {
     const data = await response.json();
     if (!data.length || !data[0].payload) throw new Error("クラウドにデータがありません。");
     state = normalizeState(data[0].payload);
+    observeRemoteClock(state.fieldMeta);
     selectedId = state.rows[0]?.id ?? null;
     selectedRowIds = new Set(selectedId ? [selectedId] : []);
     selectionAnchorId = selectedId;
-    saveAndRender();
+    // クラウドの内容で置き換える（スタンプはそのまま保持し、ローカルが
+    // 全フィールドの作者を奪わないよう commit は通さない）。
+    setCommitted();
+    localStorage.setItem(STORAGE_KEY, committedStateJson);
+    render();
 
     connectRealtime();
 
