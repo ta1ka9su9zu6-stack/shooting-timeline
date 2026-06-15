@@ -84,6 +84,7 @@ let selectionAnchorId = selectedId;
 let dragSession = null;
 let columnResizeSession = null;
 let activeCell = null;
+let rowSelectionActive = false;
 let undoStack = [];
 let redoStack = [];
 let committedStateJson = JSON.stringify(state);
@@ -352,7 +353,7 @@ function setCellFormat(row, columnId, partial) {
 }
 
 function formatTargets() {
-  if (selectedRowIds.size > 1) {
+  if (rowSelectionActive && selectedRowIds.size >= 1) {
     const targets = [];
     sortedRowsByStart().forEach((row) => {
       if (!selectedRowIds.has(row.id)) return;
@@ -399,7 +400,7 @@ function finishFormatChange() {
   renderTable();
   renderPrintSheet();
   saveStateSoon();
-  if (activeCell && selectedRowIds.size <= 1) {
+  if (activeCell && !rowSelectionActive) {
     focusScheduleCell(activeCell.rowId, activeCell.columnId);
   }
 }
@@ -421,12 +422,12 @@ function updateFormatToolbar() {
     button.classList.toggle("active", allSame);
   });
 
-  if (selectedRowIds.size > 1) {
-    elements.formatHint.textContent = `${selectedRowIds.size}行選択中の書式を変更できます`;
+  if (rowSelectionActive && selectedRowIds.size >= 1) {
+    elements.formatHint.textContent = `${selectedRowIds.size}行選択中。行全体の書式を変更できます`;
   } else {
     elements.formatHint.textContent = hasActive
       ? "選択中のセルに書式を適用します"
-      : "セルを選択すると書式を変更できます";
+      : "行番号クリックで行選択 / セルを選択すると書式を変更できます";
   }
 }
 
@@ -806,6 +807,7 @@ function bindScheduleCellKeyboard(control, row, columnId) {
   control.addEventListener("keydown", (event) => handleScheduleCellKeydown(event, row, columnId, control));
   control.addEventListener("focus", () => {
     activeCell = { rowId: row.id, columnId };
+    rowSelectionActive = false;
     if (selectedRowIds.size > 1) {
       selectedRowIds = new Set([row.id]);
       selectedId = row.id;
@@ -1440,6 +1442,7 @@ function sortedRowsByStart(rows = state.rows) {
 }
 
 function selectRow(rowId, event = {}) {
+  rowSelectionActive = true;
   const isToggle = event.ctrlKey || event.metaKey;
   const isRange = event.shiftKey;
 
