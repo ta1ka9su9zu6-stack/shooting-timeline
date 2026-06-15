@@ -75,6 +75,20 @@
           <h2 id="tableTitleHeading">表入力</h2>
           <div class="muted">タイムラインと同じデータです</div>
         </div>
+        <div id="cellFormatToolbar" class="cell-format-toolbar" aria-label="セルの書式設定">
+          <span class="format-label">文字装飾:</span>
+          <button id="formatBoldBtn" type="button" class="format-btn" disabled>太字</button>
+          <div id="formatColors" class="format-colors">
+            <button type="button" class="format-color" data-color="#000000" style="--swatch:#000000" aria-label="黒" disabled></button>
+            <button type="button" class="format-color" data-color="#d6336c" style="--swatch:#d6336c" aria-label="ピンク" disabled></button>
+            <button type="button" class="format-color" data-color="#1971c2" style="--swatch:#1971c2" aria-label="青" disabled></button>
+            <button type="button" class="format-color" data-color="#2f9e44" style="--swatch:#2f9e44" aria-label="緑" disabled></button>
+            <button type="button" class="format-color" data-color="#e8590c" style="--swatch:#e8590c" aria-label="オレンジ" disabled></button>
+            <button type="button" class="format-color" data-color="#7048e8" style="--swatch:#7048e8" aria-label="紫" disabled></button>
+          </div>
+          <button id="formatClearBtn" type="button" class="format-btn" disabled>解除</button>
+          <span id="formatHint" class="muted">セルを選択すると書式を変更できます</span>
+        </div>
         <div class="sheet-wrap">
           <table id="scheduleTable" class="schedule-table">
             <colgroup id="scheduleColgroup"></colgroup>

@@ -7,6 +7,7 @@ const MIN_DURATION = 5;
 const MIN_COLUMN_WIDTH = 72;
 const DEFAULT_CUSTOM_COLUMN_WIDTH = 150;
 const ACTION_COLUMN_ID = "__action__";
+const ROW_HANDLE_WIDTH = 30;
 const DEFAULT_ACTION_COLUMN_WIDTH = 24;
 const MIN_ACTION_COLUMN_WIDTH = 18;
 const MAX_ACTION_COLUMN_WIDTH = 90;
@@ -63,6 +64,11 @@ const elements = {
   printColgroup: document.querySelector("#printColgroup"),
   printHeader: document.querySelector("#printHeader"),
   printBody: document.querySelector("#printBody"),
+  cellFormatToolbar: document.querySelector("#cellFormatToolbar"),
+  formatBoldBtn: document.querySelector("#formatBoldBtn"),
+  formatColors: document.querySelector("#formatColors"),
+  formatClearBtn: document.querySelector("#formatClearBtn"),
+  formatHint: document.querySelector("#formatHint"),
 };
 
 let supabaseClient = null;
@@ -73,8 +79,11 @@ let cloudPushTimer = null;
 
 let state = loadState();
 let selectedId = state.rows[0]?.id ?? null;
+let selectedRowIds = new Set(selectedId ? [selectedId] : []);
+let selectionAnchorId = selectedId;
 let dragSession = null;
 let columnResizeSession = null;
+let activeCell = null;
 let undoStack = [];
 let redoStack = [];
 let committedStateJson = JSON.stringify(state);
@@ -146,6 +155,7 @@ function createRow(startTime, duration, person, content, place, note) {
     place: place || "",
     note: note || "",
     extras: {},
+    formats: {},
   };
 }
 
@@ -173,6 +183,7 @@ function normalizeState(input) {
     place: String(row.place || ""),
     note: String(row.note || ""),
     extras: normalizeExtras(row.extras, columns),
+    formats: normalizeFormats(row.formats, columns),
   }));
 
   return {
@@ -227,6 +238,19 @@ function normalizeExtras(extras, columns) {
     if (isCustomColumn(column.id)) {
       normalized[column.id] = String(source[column.id] || "");
     }
+  });
+  return normalized;
+}
+
+function normalizeFormats(formats, columns) {
+  const normalized = {};
+  const source = formats && typeof formats === "object" ? formats : {};
+  const validIds = new Set([...columns.map((column) => column.id), ACTION_COLUMN_ID]);
+  Object.entries(source).forEach(([columnId, value]) => {
+    if (!validIds.has(columnId) || !value || typeof value !== "object") return;
+    const bold = Boolean(value.bold);
+    const color = typeof value.color === "string" && /^#[0-9a-fA-F]{6}$/.test(value.color) ? value.color : "";
+    if (bold || color) normalized[columnId] = { bold, color };
   });
   return normalized;
 }
@@ -288,6 +312,18 @@ function bindControls() {
     elements.historyDialog.showModal();
     openHistory();
   });
+
+  elements.formatBoldBtn.addEventListener("click", () => {
+    applyBoldToggle();
+  });
+  elements.formatClearBtn.addEventListener("click", () => {
+    applyClearFormat();
+  });
+  elements.formatColors.querySelectorAll(".format-color").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyColorToggle(button.dataset.color);
+    });
+  });
   elements.refreshHistoryBtn.addEventListener("click", openHistory);
   elements.addColumnBtn.addEventListener("click", addColumnFromDialog);
 
@@ -298,6 +334,106 @@ function bindControls() {
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", onPointerUp);
   window.addEventListener("keydown", onGlobalKeyDown);
+}
+
+function getCellFormat(row, columnId) {
+  return (row.formats && row.formats[columnId]) || { bold: false, color: "" };
+}
+
+function setCellFormat(row, columnId, partial) {
+  row.formats ||= {};
+  const current = getCellFormat(row, columnId);
+  const next = { bold: current.bold, color: current.color, ...partial };
+  if (!next.bold && !next.color) {
+    delete row.formats[columnId];
+  } else {
+    row.formats[columnId] = { bold: Boolean(next.bold), color: next.color || "" };
+  }
+}
+
+function formatTargets() {
+  if (selectedRowIds.size > 1) {
+    const targets = [];
+    sortedRowsByStart().forEach((row) => {
+      if (!selectedRowIds.has(row.id)) return;
+      visibleTableColumns().forEach((column) => {
+        targets.push({ row, columnId: column.id });
+      });
+    });
+    return targets;
+  }
+  if (activeCell) {
+    const row = findRow(activeCell.rowId);
+    if (!row) return [];
+    return [{ row, columnId: activeCell.columnId }];
+  }
+  return [];
+}
+
+function applyBoldToggle() {
+  const targets = formatTargets();
+  if (!targets.length) return;
+  const allBold = targets.every((t) => getCellFormat(t.row, t.columnId).bold);
+  const newBold = !allBold;
+  targets.forEach((t) => setCellFormat(t.row, t.columnId, { bold: newBold }));
+  finishFormatChange();
+}
+
+function applyColorToggle(color) {
+  const targets = formatTargets();
+  if (!targets.length) return;
+  const allSame = targets.every((t) => getCellFormat(t.row, t.columnId).color === color);
+  const newColor = allSame ? "" : color;
+  targets.forEach((t) => setCellFormat(t.row, t.columnId, { color: newColor }));
+  finishFormatChange();
+}
+
+function applyClearFormat() {
+  const targets = formatTargets();
+  if (!targets.length) return;
+  targets.forEach((t) => setCellFormat(t.row, t.columnId, { bold: false, color: "" }));
+  finishFormatChange();
+}
+
+function finishFormatChange() {
+  renderTable();
+  renderPrintSheet();
+  saveStateSoon();
+  if (activeCell && selectedRowIds.size <= 1) {
+    focusScheduleCell(activeCell.rowId, activeCell.columnId);
+  }
+}
+
+function updateFormatToolbar() {
+  const targets = formatTargets();
+  const hasActive = targets.length > 0;
+  elements.formatBoldBtn.disabled = !hasActive;
+  elements.formatClearBtn.disabled = !hasActive;
+  const colorButtons = elements.formatColors.querySelectorAll(".format-color");
+  colorButtons.forEach((button) => {
+    button.disabled = !hasActive;
+  });
+
+  const allBold = hasActive && targets.every((t) => getCellFormat(t.row, t.columnId).bold);
+  elements.formatBoldBtn.classList.toggle("active", allBold);
+  colorButtons.forEach((button) => {
+    const allSame = hasActive && targets.every((t) => getCellFormat(t.row, t.columnId).color.toLowerCase() === button.dataset.color.toLowerCase());
+    button.classList.toggle("active", allSame);
+  });
+
+  if (selectedRowIds.size > 1) {
+    elements.formatHint.textContent = `${selectedRowIds.size}行選択中の書式を変更できます`;
+  } else {
+    elements.formatHint.textContent = hasActive
+      ? "選択中のセルに書式を適用します"
+      : "セルを選択すると書式を変更できます";
+  }
+}
+
+function applyCellFormatStyle(control, row, columnId) {
+  const fmt = (row.formats && row.formats[columnId]) || {};
+  control.style.fontWeight = fmt.bold ? "700" : "";
+  control.style.color = fmt.color || "";
 }
 
 function render() {
@@ -311,22 +447,25 @@ function render() {
   renderTable();
   renderTimeline();
   renderPrintSheet();
+  updateFormatToolbar();
 }
 
 function renderTable() {
   const columns = visibleTableColumns();
   renderTableHeader();
   const fragment = document.createDocumentFragment();
-  sortedRowsByStart().forEach((row) => {
+  sortedRowsByStart().forEach((row, index) => {
     const tr = document.createElement("tr");
     tr.dataset.id = row.id;
-    tr.className = `${row.id === selectedId ? "selected-row" : ""} ${isBreak(row) ? "break-row" : ""}`.trim();
+    const isRangeSelected = selectedRowIds.has(row.id) && selectedRowIds.size > 1;
+    tr.className = `${row.id === selectedId ? "selected-row" : ""} ${isRangeSelected ? "range-selected" : ""} ${isBreak(row) ? "break-row" : ""}`.trim();
     tr.addEventListener("click", (event) => {
       if (event.target.closest("input, textarea, button, select")) return;
-      selectedId = row.id;
+      selectRow(row.id, event);
       render();
     });
 
+    tr.appendChild(rowHandleCell(row, index));
     columns.forEach((column) => {
       tr.appendChild(tableCellForColumn(row, column));
     });
@@ -337,11 +476,25 @@ function renderTable() {
   elements.scheduleBody.replaceChildren(fragment);
 }
 
+function rowHandleCell(row, index) {
+  const td = document.createElement("td");
+  td.className = "row-handle";
+  td.textContent = String(index + 1);
+  td.title = "クリックで行を選択 / Shiftで範囲選択 / Ctrl(⌘)で複数選択";
+  return td;
+}
+
 function renderTableHeader() {
   const fragment = document.createDocumentFragment();
   const columns = visibleTableColumns();
-  renderColgroup(elements.scheduleColgroup, columns, true);
+  renderColgroup(elements.scheduleColgroup, columns, true, true);
   setScheduleTableWidth(columns);
+
+  const handleHeader = document.createElement("th");
+  handleHeader.className = "row-handle-header";
+  handleHeader.setAttribute("aria-label", "行選択");
+  fragment.appendChild(handleHeader);
+
   columns.forEach((column, index) => {
     const th = document.createElement("th");
     th.className = "column-header";
@@ -386,8 +539,13 @@ function renderTableHeader() {
   elements.scheduleHeader.replaceChildren(fragment);
 }
 
-function renderColgroup(target, columns, includeActionColumn = false) {
+function renderColgroup(target, columns, includeActionColumn = false, includeHandleColumn = false) {
   const fragment = document.createDocumentFragment();
+  if (includeHandleColumn) {
+    const handleCol = document.createElement("col");
+    handleCol.style.width = `${ROW_HANDLE_WIDTH}px`;
+    fragment.appendChild(handleCol);
+  }
   const widths = displayColumnWidths(columns, includeActionColumn);
   columns.forEach((column, index) => {
     const col = document.createElement("col");
@@ -404,7 +562,7 @@ function renderColgroup(target, columns, includeActionColumn = false) {
 
 function tableWidth(columns, includeActionColumn = false) {
   const total = columns.reduce((sum, column) => sum + normalizeColumnWidth(column.width), 0);
-  const actionWidth = includeActionColumn ? normalizeActionColumnWidth(state.actionColumnWidth) : 0;
+  const actionWidth = includeActionColumn ? normalizeActionColumnWidth(state.actionColumnWidth) + ROW_HANDLE_WIDTH : 0;
   const minimum = includeActionColumn ? SCHEDULE_TABLE_MIN_WIDTH : 420;
   const configuredWidth = includeActionColumn ? normalizeTableWidth(state.tableWidth) : minimum;
   return Math.max(minimum, configuredWidth, total + actionWidth);
@@ -412,7 +570,7 @@ function tableWidth(columns, includeActionColumn = false) {
 
 function baseScheduleTableWidth(columns) {
   const total = columns.reduce((sum, column) => sum + normalizeColumnWidth(column.width), 0);
-  return total + normalizeActionColumnWidth(state.actionColumnWidth);
+  return total + normalizeActionColumnWidth(state.actionColumnWidth) + ROW_HANDLE_WIDTH;
 }
 
 function displayColumnWidths(columns, includeActionColumn = false) {
@@ -420,7 +578,7 @@ function displayColumnWidths(columns, includeActionColumn = false) {
   if (!includeActionColumn || !columns.length) return baseWidths;
 
   const baseTotal = baseWidths.reduce((sum, width) => sum + width, 0);
-  const targetTotal = tableWidth(columns, true) - normalizeActionColumnWidth(state.actionColumnWidth);
+  const targetTotal = tableWidth(columns, true) - normalizeActionColumnWidth(state.actionColumnWidth) - ROW_HANDLE_WIDTH;
   const extraTotal = Math.max(0, targetTotal - baseTotal);
   if (!extraTotal) return baseWidths;
 
@@ -501,6 +659,7 @@ function tableInputCell(row, field, type, value, className = "") {
   input.addEventListener("change", () => {
     updateRow(row.id, field, input.value);
   });
+  applyCellFormatStyle(input, row, field);
   td.appendChild(input);
   return td;
 }
@@ -533,6 +692,7 @@ function timeTextCell(row, field, value) {
     saveAndRender();
     applyPendingRemoteState();
   });
+  applyCellFormatStyle(input, row, field);
   td.appendChild(input);
   return td;
 }
@@ -584,6 +744,7 @@ function durationCell(row) {
     applyPendingRemoteState();
   });
 
+  applyCellFormatStyle(input, row, "duration");
   control.append(input);
   td.appendChild(control);
   return td;
@@ -609,6 +770,7 @@ function tableTextareaCell(row, field, value) {
     saveAndRender();
     applyPendingRemoteState();
   });
+  applyCellFormatStyle(textarea, row, field);
   td.appendChild(textarea);
   return td;
 }
@@ -633,6 +795,7 @@ function tableCustomCell(row, column) {
     saveAndRender();
     applyPendingRemoteState();
   });
+  applyCellFormatStyle(textarea, row, column.id);
   td.appendChild(textarea);
   return td;
 }
@@ -641,6 +804,15 @@ function bindScheduleCellKeyboard(control, row, columnId) {
   control.dataset.cellRowId = row.id;
   control.dataset.cellColumnId = columnId;
   control.addEventListener("keydown", (event) => handleScheduleCellKeydown(event, row, columnId, control));
+  control.addEventListener("focus", () => {
+    activeCell = { rowId: row.id, columnId };
+    if (selectedRowIds.size > 1) {
+      selectedRowIds = new Set([row.id]);
+      selectedId = row.id;
+      selectionAnchorId = row.id;
+    }
+    updateFormatToolbar();
+  });
 }
 
 function handleScheduleCellKeydown(event, row, columnId, control) {
@@ -863,6 +1035,9 @@ function renderPrintSheet() {
       printColumns.forEach((column) => {
         const td = document.createElement("td");
         td.textContent = valueForColumn(row, column);
+        const fmt = (row.formats && row.formats[column.id]) || {};
+        if (fmt.bold) td.style.fontWeight = "700";
+        if (fmt.color) td.style.color = fmt.color;
         tr.appendChild(td);
       });
       fragment.appendChild(tr);
@@ -992,6 +1167,11 @@ function onGlobalKeyDown(event) {
   if (key === "y") {
     event.preventDefault();
     redoLastState();
+    return;
+  }
+  if (key === "b") {
+    event.preventDefault();
+    applyBoldToggle();
   }
 }
 
@@ -1050,6 +1230,8 @@ function addRow() {
   const row = createRow(formatTime(Math.min(nextStart, state.dayEnd - 50)), 50, "", "", "", "");
   state.rows.push(row);
   selectedId = row.id;
+  selectedRowIds = new Set([row.id]);
+  selectionAnchorId = row.id;
   saveAndRender();
 }
 
@@ -1059,17 +1241,23 @@ function duplicateSelected() {
   const copy = {
     ...row,
     extras: { ...(row.extras || {}) },
+    formats: { ...(row.formats || {}) },
     id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
     start: Math.min(row.start + row.duration, state.dayEnd - row.duration),
   };
   state.rows.push(copy);
   selectedId = copy.id;
+  selectedRowIds = new Set([copy.id]);
+  selectionAnchorId = copy.id;
   saveAndRender();
 }
 
 function removeRow(id) {
   state.rows = state.rows.filter((row) => row.id !== id);
   if (selectedId === id) selectedId = state.rows[0]?.id ?? null;
+  selectedRowIds.delete(id);
+  if (selectedRowIds.size === 0 && selectedId) selectedRowIds = new Set([selectedId]);
+  if (selectionAnchorId === id) selectionAnchorId = selectedId;
   saveAndRender();
 }
 
@@ -1251,6 +1439,52 @@ function sortedRowsByStart(rows = state.rows) {
     .map((entry) => entry.row);
 }
 
+function selectRow(rowId, event = {}) {
+  const isToggle = event.ctrlKey || event.metaKey;
+  const isRange = event.shiftKey;
+
+  if (isRange && selectionAnchorId) {
+    const order = sortedRowsByStart().map((row) => row.id);
+    const anchorIndex = order.indexOf(selectionAnchorId);
+    const targetIndex = order.indexOf(rowId);
+    if (anchorIndex !== -1 && targetIndex !== -1) {
+      const [from, to] = anchorIndex <= targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
+      selectedRowIds = new Set(order.slice(from, to + 1));
+    } else {
+      selectedRowIds = new Set([rowId]);
+    }
+    selectedId = rowId;
+    return;
+  }
+
+  if (isToggle) {
+    const next = new Set(selectedRowIds);
+    if (next.has(rowId)) {
+      next.delete(rowId);
+    } else {
+      next.add(rowId);
+    }
+    if (next.size === 0) next.add(rowId);
+    selectedRowIds = next;
+    selectedId = rowId;
+    selectionAnchorId = rowId;
+    return;
+  }
+
+  selectedRowIds = new Set([rowId]);
+  selectedId = rowId;
+  selectionAnchorId = rowId;
+}
+
+function pruneSelection() {
+  selectedRowIds = new Set([...selectedRowIds].filter((id) => state.rows.some((row) => row.id === id)));
+  if (!state.rows.some((row) => row.id === selectedId)) {
+    selectedId = state.rows[0]?.id ?? null;
+  }
+  if (selectedRowIds.size === 0 && selectedId) selectedRowIds = new Set([selectedId]);
+  if (!selectionAnchorId || !selectedRowIds.has(selectionAnchorId)) selectionAnchorId = selectedId;
+}
+
 function isBreak(row) {
   const extraText = Object.values(row.extras || {}).join(" ");
   return /休憩|break/i.test(`${row.person} ${row.content} ${row.note} ${extraText}`);
@@ -1397,9 +1631,7 @@ function undoLastState() {
     if (redoStack.length > HISTORY_LIMIT) redoStack.shift();
     state = normalizeState(JSON.parse(previousJson));
     committedStateJson = JSON.stringify(state);
-    if (!state.rows.some((row) => row.id === selectedId)) {
-      selectedId = state.rows[0]?.id ?? null;
-    }
+    pruneSelection();
     localStorage.setItem(STORAGE_KEY, committedStateJson);
     elements.saveStatus.textContent = "1つ前に戻しました";
     render();
@@ -1421,9 +1653,7 @@ function redoLastState() {
     if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
     state = normalizeState(JSON.parse(nextJson));
     committedStateJson = JSON.stringify(state);
-    if (!state.rows.some((row) => row.id === selectedId)) {
-      selectedId = state.rows[0]?.id ?? null;
-    }
+    pruneSelection();
     localStorage.setItem(STORAGE_KEY, committedStateJson);
     elements.saveStatus.textContent = "1つ先の状態に進みました";
     render();
@@ -1528,9 +1758,7 @@ function applyRemoteState(remoteState) {
   state = normalizeState(remoteState);
   committedStateJson = JSON.stringify(state);
 
-  if (!state.rows.some((row) => row.id === selectedId)) {
-    selectedId = state.rows[0]?.id ?? null;
-  }
+  pruneSelection();
 
   localStorage.setItem(STORAGE_KEY, committedStateJson);
   render();
@@ -1661,6 +1889,8 @@ function restoreHistoryEntry(entry) {
 
   state = normalizeState(entry.payload);
   selectedId = state.rows[0]?.id ?? null;
+  selectedRowIds = new Set(selectedId ? [selectedId] : []);
+  selectionAnchorId = selectedId;
   saveAndRender();
   elements.historyDialog.close();
 }
@@ -1680,6 +1910,8 @@ async function pullFromCloud() {
     if (!data.length || !data[0].payload) throw new Error("クラウドにデータがありません。");
     state = normalizeState(data[0].payload);
     selectedId = state.rows[0]?.id ?? null;
+    selectedRowIds = new Set(selectedId ? [selectedId] : []);
+    selectionAnchorId = selectedId;
     saveAndRender();
 
     connectRealtime();
